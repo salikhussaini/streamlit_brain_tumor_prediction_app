@@ -1,0 +1,99 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Streamlit
+.streamlit/
+*.streamlit.run
+
+# IDE and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Models (too large for repo, should be generated or downloaded)
+saved_models/*.keras
+saved_models/*.h5
+saved_models/*.pb
+saved_models/saved_model/
+
+# Keep class_names.npy if needed for inference
+!saved_models/class_names.npy
+
+# Cache and temp files
+.cache/
+*.cache
+*.tmp
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+logs/
+*.log
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Compiled extensions
+*.o
+*.a
+*.so
+
+# Distribution
+dist/
+build/
+
+# Miscellaneous
+.mypy_cache/
+.dmypy.json
+dmypy.json
