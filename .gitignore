@@ -44,14 +44,6 @@ MANIFEST
 *.sublime-project
 *.sublime-workspace
 
-# Models (too large for repo, should be generated or downloaded)
-saved_models/*.keras
-saved_models/*.h5
-saved_models/*.pb
-saved_models/saved_model/
-
-# Keep class_names.npy if needed for inference
-!saved_models/class_names.npy
 
 # Cache and temp files
 .cache/
