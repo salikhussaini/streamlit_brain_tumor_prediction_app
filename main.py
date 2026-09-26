@@ -105,7 +105,7 @@ def load_model():
     
     if not models:
         st.error("No trained models found in saved_models directory")
-        st.info("Please run the training script first: `python brain_tumor_prediction.py`")
+        st.info("Please run the training script first")
         return None, None
     
     # If only one model, load it automatically

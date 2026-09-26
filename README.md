@@ -51,7 +51,11 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Running the App
+### Live App
+
+Try the app online here: **[Brain Tumor Prediction App](https://brain-tumor-prediction-app.streamlit.app/)**
+
+### Running Locally
 
 ```bash
 streamlit run main.py
