@@ -1,14 +1,11 @@
-# Core Streamlit Framework
-streamlit>=1.0.0
+streamlit>=1.40,<2.0
 
-# Deep Learning & ML
-tensorflow==2.22.0rc0
-numpy>=1.21.0
-scikit-learn>=1.0.0
+tensorflow==2.15.1
+keras==2.15.0
+numpy==1.26.4
+scikit-learn>=1.0,<2.0
 
-# Image Processing
-Pillow>=9.0.0
-opencv-python-headless>=4.5.0
+Pillow>=9.0
+opencv-python-headless>=4.5
 
-# Utilities
-python-dotenv>=0.19.0
+python-dotenv>=0.19

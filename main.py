@@ -91,7 +91,8 @@ def load_model_cached(model_path):
         model = tf.keras.models.load_model(
             model_path,
             custom_objects={'focal_loss': focal_loss},
-            safe_mode=False
+            safe_mode=False,
+            compile=False
         )
         class_names = np.load(CLASS_NAMES_FILE, allow_pickle=True).tolist()
         return model, class_names
