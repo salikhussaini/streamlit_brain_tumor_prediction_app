@@ -87,9 +87,11 @@ def load_model_cached(model_path):
     """Load the model from a specific path (cached to avoid reloading)"""
     try:
         # Pass custom_objects so TensorFlow can find focal_loss function
+        # Use safe_mode=False to allow loading nested models (Sequential containing Functional MobileNetV2)
         model = tf.keras.models.load_model(
             model_path,
-            custom_objects={'focal_loss': focal_loss}
+            custom_objects={'focal_loss': focal_loss},
+            safe_mode=False
         )
         class_names = np.load(CLASS_NAMES_FILE, allow_pickle=True).tolist()
         return model, class_names
