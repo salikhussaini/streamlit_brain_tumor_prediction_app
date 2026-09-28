@@ -503,7 +503,7 @@ def main():
             
             # Score breakdown
             st.subheader("📊 Score Breakdown")
-            score_dict = {class_names[i]: float(all_scores[i].numpy()) * 100 
+            score_dict = {class_names[i]: float(all_scores[i]) * 100 
                          for i in range(len(class_names))}
             
             for class_name, score in score_dict.items():
