@@ -219,7 +219,7 @@ def preprocess_medical_image(image_array):
 def generate_model_diagram(model):
     """Generate a dynamic architecture diagram from model structure"""
     diagram_lines = []
-    diagram_lines.append("INPUT (180×180×3)")
+    diagram_lines.append(f"INPUT ({IMG_HEIGHT}×{IMG_WIDTH}×3)")
     diagram_lines.append("       ↓")
     
     for i, layer in enumerate(model.layers):
@@ -288,34 +288,34 @@ def generate_model_diagram(model):
 # ========================
 # Prediction Function
 # ========================
-def predict_brain_tumor(image, model, class_names):
-    """Predict if image contains brain tumor"""
-    # Ensure image is RGB (handle grayscale, RGBA, etc.)
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
+def predict_brain_tumor(preprocessed_image, model, class_names):
+    """Run prediction on an already preprocessed image.
     
-    # Resize image
-    img = image.resize((IMG_HEIGHT, IMG_WIDTH))
+    Args:
+        preprocessed_image: Image array already preprocessed with CLAHE + normalization
+        model: Trained model
+        class_names: List of class names
     
-    # Convert to numpy array with correct dtype
-    img_array = np.array(img, dtype=np.float32) / 255.0
-    
-    # Ensure correct shape (height, width, 3)
-    if len(img_array.shape) != 3:
-        img_array = np.stack([img_array] * 3, axis=-1)
-    elif img_array.shape[-1] != 3:
-        # If it has wrong number of channels, convert
-        img_array = np.stack([img_array[:, :, 0]] * 3, axis=-1)
-    
+    Returns:
+        predicted_class: Predicted class name
+        confidence: Confidence score as percentage
+        scores: Array of probabilities for all classes
+    """
     # Add batch dimension
-    img_array = np.expand_dims(img_array, axis=0)
+    img_batch = np.expand_dims(preprocessed_image, axis=0)
     
-    # Make prediction
-    predictions = model.predict(img_array, verbose=0)
-    scores = tf.nn.softmax(predictions[0])
+    # Model outputs logits
+    predictions = model.predict(img_batch, verbose=0)
     
-    predicted_class = class_names[np.argmax(scores)]
-    confidence = 100 * np.max(scores)
+    # Convert logits to probabilities
+    scores = tf.nn.softmax(predictions[0]).numpy()
+    
+    # Predicted class
+    predicted_index = int(np.argmax(scores))
+    predicted_class = class_names[predicted_index]
+    
+    # Confidence
+    confidence = float(scores[predicted_index] * 100)
     
     return predicted_class, confidence, scores
 
@@ -433,17 +433,13 @@ def main():
         st.subheader("🎯 Prediction Result")
         
         # Prepare image data
-        img_resized = image_to_predict.resize((IMG_HEIGHT, IMG_WIDTH))
-        img_array = np.array(img_resized, dtype=np.float32) / 255.0
+        img_resized = image_to_predict.convert("RGB").resize(
+            (IMG_WIDTH, IMG_HEIGHT)
+        )
+        img_array = np.array(img_resized, dtype=np.uint8)
         
-        # Ensure correct shape
-        if len(img_array.shape) != 3:
-            img_array = np.stack([img_array] * 3, axis=-1)
-        elif img_array.shape[-1] != 3:
-            img_array = np.stack([img_array[:, :, 0]] * 3, axis=-1)
-        
-        # Apply preprocessing
-        img_preprocessed = preprocess_medical_image((img_array * 255).astype(np.uint8))
+        # Apply the exact training preprocessing (CLAHE + intensity normalization)
+        img_preprocessed = preprocess_medical_image(img_array)
         
         # Display images side-by-side
         st.subheader("📸 Image Processing")
@@ -487,7 +483,7 @@ def main():
             # Make prediction
             with st.spinner("Analyzing image..."):
                 predicted_class, confidence, all_scores = predict_brain_tumor(
-                    image_to_predict, model, class_names
+                    img_preprocessed, model, class_names
                 )
             
             # Prediction box
