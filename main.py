@@ -488,14 +488,17 @@ def main():
             
             # Prediction box
             if predicted_class == 'yes':
-                st.error(f"🔴 **Prediction: Tumor Detected**")
+                st.error(f"🔴 **Model Prediction: Tumor Detected**")
             else:
-                st.success(f"🟢 **Prediction: No Tumor**")
+                st.success("🟢 **Model Prediction: No Tumor Detected**")
             
-            # Confidence
+            # Model Probability
             st.metric(
                 label="Confidence",
                 value=f"{confidence:.2f}%"
+            )
+            st.caption(
+                "Softmax output from the model; this is not a clinically calibrated probability."
             )
             
             # Score breakdown
