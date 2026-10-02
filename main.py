@@ -76,40 +76,39 @@ class GradCAM:
     model's prediction by showing the gradient of the predicted class
     with respect to the feature maps of a target layer.
     
-    This provides interpretability - shows where the model "looked" to
-    make its prediction.
+    Works with both direct Conv2D layers and nested layers in transfer learning models.
     """
     
-    def __init__(self, model, layer_name):
+    def __init__(self, model, layer_name, base_model_name=None):
         """
         Args:
             model: Keras model
-            layer_name: Name of the convolutional layer to visualize (can be nested like 'base_model.Conv_1')
+            layer_name: Name of the convolutional layer (e.g., 'Conv_1')
+            base_model_name: Parent model name if layer is nested (e.g., 'mobilenetv2_1.00_224')
         """
         self.model = model
         self.layer_name = layer_name
+        self.base_model_name = base_model_name
         self.grad_model = None
         self._build_grad_model()
     
     def _build_grad_model(self):
         """Build a model that returns both predictions and gradients"""
-        # Try to find the target layer
         try:
-            # First try direct access
+            # Case 1: Direct layer access (non-nested)
             self.target_layer = self.model.get_layer(self.layer_name)
         except ValueError:
-            # If not found, try nested access (e.g., 'mobilenetv2_1.00_224.Conv_1')
-            try:
-                parts = self.layer_name.split('.')
-                layer = self.model.get_layer(parts[0])
-                for part in parts[1:]:
-                    if hasattr(layer, 'get_layer'):
-                        layer = layer.get_layer(part)
-                    else:
-                        raise ValueError(f"Cannot access layer {self.layer_name}")
-                self.target_layer = layer
-            except Exception as e:
-                raise ValueError(f"Cannot find layer {self.layer_name}: {e}")
+            # Case 2: Nested layer - need to build intermediate model
+            if self.base_model_name:
+                try:
+                    base_model = self.model.get_layer(self.base_model_name)
+                    self.target_layer = base_model.get_layer(self.layer_name)
+                except:
+                    raise ValueError(
+                        f"Cannot find layer '{self.layer_name}' in base model '{self.base_model_name}'"
+                    )
+            else:
+                raise ValueError(f"Cannot find layer {self.layer_name}")
         
         # Create a model that outputs predictions and target layer outputs
         self.grad_model = tf.keras.models.Model(
@@ -164,33 +163,54 @@ def find_conv_layers(model):
     """
     Find all convolutional layers in the model, including nested layers in transfer learning models
     
-    Returns layer names with full paths for nested models (e.g., 'mobilenetv2_1.00_224.Conv_1')
+    Returns: List of tuples (layer_name, base_model_name) where base_model_name is None for direct layers
     """
     conv_layers = []
     
-    def _search_layers(parent_layer, parent_name=""):
-        """Recursively search for Conv2D layers"""
-        if isinstance(parent_layer, tf.keras.layers.Conv2D):
-            # Add this Conv2D layer
-            full_name = f"{parent_name}.{parent_layer.name}" if parent_name else parent_layer.name
-            conv_layers.append(full_name)
-        
-        # Handle layers that contain other layers (models, sequential, functional, etc.)
+    # Check top-level for direct Conv2D layers
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            conv_layers.append((layer.name, None))
+    
+    # Check inside model layers (base models, sequential, functional, etc.)
+    for parent_layer in model.layers:
         if hasattr(parent_layer, 'layers'):
             for sublayer in parent_layer.layers:
-                # Build the full path for nested layers
-                if parent_name:
-                    new_parent_name = f"{parent_name}.{parent_layer.name}"
-                else:
-                    new_parent_name = parent_layer.name
+                if isinstance(sublayer, tf.keras.layers.Conv2D):
+                    conv_layers.append((sublayer.name, parent_layer.name))
                 
-                _search_layers(sublayer, new_parent_name)
-    
-    # Search through all top-level layers in the model
-    for layer in model.layers:
-        _search_layers(layer)
+                # Also check deeper nesting (e.g., layers inside the base model)
+                if hasattr(sublayer, 'layers'):
+                    for subsubLayer in sublayer.layers:
+                        if isinstance(subsubLayer, tf.keras.layers.Conv2D):
+                            conv_layers.append((subsubLayer.name, parent_layer.name))
     
     return conv_layers
+
+
+def get_all_layers_info(model):
+    """Get information about all layers in the model for debugging"""
+    info = []
+    for layer in model.layers:
+        info.append({
+            'name': layer.name,
+            'type': layer.__class__.__name__,
+            'has_sublayers': hasattr(layer, 'layers')
+        })
+        if hasattr(layer, 'layers'):
+            for sublayer in layer.layers[:5]:  # Limit to first 5 for readability
+                info.append({
+                    'name': f"  └─ {sublayer.name}",
+                    'type': sublayer.__class__.__name__,
+                    'has_sublayers': hasattr(sublayer, 'layers')
+                })
+            if len(layer.layers) > 5:
+                info.append({
+                    'name': f"  └─ ... and {len(layer.layers) - 5} more layers",
+                    'type': '...',
+                    'has_sublayers': False
+                })
+    return info
 
 
 def generate_gradcam_visualization(gradcam_heatmap, original_image, alpha=0.4):
@@ -706,98 +726,116 @@ def main():
             st.markdown("---")
             st.subheader("🔍 Model Interpretability - GradCAM Visualization")
             
-            with st.spinner("Generating GradCAM heatmap..."):
+            with st.spinner("Analyzing convolutional layers..."):
                 try:
-                    # Find convolutional layers (including nested layers in transfer learning)
+                    # Find all convolutional layers
                     conv_layers = find_conv_layers(model)
                     
-                    if not conv_layers:
-                        # Fallback: search for any layer with 'conv' in the name
-                        conv_layers = [layer.name for layer in model.layers if 'conv' in layer.name.lower()]
-                    
                     if conv_layers:
-                        # Use the last convolutional layer for GradCAM
-                        # (captures high-level features without being too abstract)
-                        last_conv_layer = conv_layers[-1]
+                        st.success(f"✓ Found {len(conv_layers)} convolutional layer(s)")
                         
-                        try:
-                            # Initialize GradCAM
-                            gradcam = GradCAM(model, last_conv_layer)
-                            
-                            # Compute GradCAM heatmap using preprocessed image
-                            # Get predicted class index
-                            predicted_index = np.argmax(all_scores)
-                            heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
-                            
-                            # Generate visualization with user-selected alpha
-                            gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
-                            
-                            # Display side-by-side: original and GradCAM
-                            col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
-                            
-                            with col_orig_grad:
-                                st.write("**Original Image**")
-                                st.image(img_preprocessed, use_container_width=True)
-                            
-                            with col_sep_grad:
-                                st.write("")
-                            
-                            with col_gradcam:
-                                st.write("**GradCAM Heatmap**")
-                                st.write(f"*(Layer: {last_conv_layer})*")
-                                st.image(gradcam_img, use_container_width=True)
-                            
-                            st.info(
-                                "**GradCAM Explanation:**\n\n"
-                                "The heatmap shows which regions of the brain MRI were most important "
-                                "for the model's prediction. "
-                                "\n- **Red regions** = High importance for the prediction\n"
-                                "- **Blue regions** = Low importance for the prediction\n\n"
-                                "This helps interpret WHY the model made its prediction."
-                            )
+                        # Select which layer to visualize (default to last one)
+                        layer_options = [
+                            f"{layer_name} {'(nested)' if base_model else ''}" 
+                            for layer_name, base_model in conv_layers
+                        ]
                         
-                        except Exception as grad_error:
-                            st.warning(f"Could not generate GradCAM for layer '{last_conv_layer}': {str(grad_error)}")
+                        selected_layer_idx = st.selectbox(
+                            "Select convolutional layer for visualization:",
+                            range(len(conv_layers)),
+                            format_func=lambda i: layer_options[i],
+                            index=len(conv_layers) - 1  # Default to last layer
+                        )
+                        
+                        selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
+                        
+                        with st.spinner(f"Generating GradCAM for layer '{selected_layer_name}'..."):
+                            try:
+                                # Initialize GradCAM with proper layer references
+                                gradcam = GradCAM(model, selected_layer_name, selected_base_model)
+                                
+                                # Compute GradCAM heatmap
+                                predicted_index = np.argmax(all_scores)
+                                heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
+                                
+                                # Generate visualization with user-selected alpha
+                                gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                                
+                                # Display side-by-side: original and GradCAM
+                                col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
+                                
+                                with col_orig_grad:
+                                    st.write("**Original Image**")
+                                    st.image(img_preprocessed, use_container_width=True)
+                                
+                                with col_sep_grad:
+                                    st.write("")
+                                
+                                with col_gradcam:
+                                    st.write("**GradCAM Heatmap**")
+                                    layer_info = f"{selected_layer_name}"
+                                    if selected_base_model:
+                                        layer_info += f" (from {selected_base_model})"
+                                    st.write(f"*Layer: {layer_info}*")
+                                    st.image(gradcam_img, use_container_width=True)
+                                
+                                st.info(
+                                    "**GradCAM Explanation:**\n\n"
+                                    "The heatmap shows which regions of the brain MRI were most important "
+                                    "for the model's prediction. "
+                                    "\n- **Red regions** = High importance for the prediction\n"
+                                    "- **Blue regions** = Low importance for the prediction\n\n"
+                                    "This helps interpret WHY the model made its prediction."
+                                )
                             
-                            # Try alternative: first conv layer
-                            if len(conv_layers) > 1:
-                                st.info("Attempting with earlier convolutional layer...")
-                                try:
-                                    first_conv_layer = conv_layers[0]
-                                    gradcam = GradCAM(model, first_conv_layer)
-                                    predicted_index = np.argmax(all_scores)
-                                    heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
-                                    gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                            except Exception as grad_error:
+                                st.error(f"❌ Could not generate GradCAM: {str(grad_error)}")
+                                
+                                with st.expander("🔧 Debugging Information"):
+                                    st.write("**Available layers in model:**")
+                                    layer_info = get_all_layers_info(model)
+                                    for info in layer_info:
+                                        st.code(f"{info['name']} ({info['type']})")
                                     
-                                    col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
-                                    with col_orig_grad:
-                                        st.write("**Original Image**")
-                                        st.image(img_preprocessed, use_container_width=True)
-                                    with col_sep_grad:
-                                        st.write("")
-                                    with col_gradcam:
-                                        st.write("**GradCAM Heatmap**")
-                                        st.write(f"*(Layer: {first_conv_layer})*")
-                                        st.image(gradcam_img, use_container_width=True)
-                                except Exception as fallback_error:
-                                    st.error(f"Could not generate GradCAM: {str(fallback_error)}")
-                            else:
-                                st.error("Could not generate GradCAM with available layers")
+                                    st.write("\n**Found convolutional layers:**")
+                                    for layer_name, base_model in conv_layers:
+                                        if base_model:
+                                            st.code(f"- {layer_name} (inside {base_model})")
+                                        else:
+                                            st.code(f"- {layer_name}")
+                    
                     else:
                         st.warning("⚠️ No convolutional layers found in model")
-                        st.info(
-                            "**For Transfer Learning Models:**\n\n"
-                            "If using MobileNetV2, EfficientNet, or similar pretrained models, "
-                            "the convolutional layers might be nested inside a base model layer. "
-                            "\n\n**To enable GradCAM:**\n"
-                            "1. Ensure your model has Conv2D layers accessible at the model level\n"
-                            "2. Try extracting the base model and wrapping it in a new Sequential model\n"
-                            "3. Check that the model was compiled with `trainable=True` for base layers"
-                        )
+                        
+                        with st.expander("🔧 Model Architecture Information"):
+                            st.write("**All layers in your model:**")
+                            layer_info = get_all_layers_info(model)
+                            for info in layer_info:
+                                st.code(f"{info['name']} ({info['type']})")
+                            
+                            st.info(
+                                "**Options to fix this:**\n\n"
+                                "1. **Check if model has a base_model attribute:**\n"
+                                "   - Ensure base layers are accessible (not wrapped in a way that hides them)\n"
+                                "   - Try accessing: `model.layers[0].layers` for nested models\n\n"
+                                "2. **Rebuild the model:**\n"
+                                "   ```python\n"
+                                "   base_model = tf.keras.applications.MobileNetV2(...)\n"
+                                "   model = tf.keras.Sequential([\n"
+                                "       base_model,\n"
+                                "       tf.keras.layers.GlobalAveragePooling2D(),\n"
+                                "       tf.keras.layers.Dense(num_classes)\n"
+                                "   ])\n"
+                                "   ```\n\n"
+                                "3. **Use Activation Maps instead** (alternative to GradCAM):\n"
+                                "   - Extract feature maps directly from intermediate layers\n"
+                                "   - Works with any model architecture"
+                            )
                 
                 except Exception as e:
-                    st.error(f"GradCAM Error: {str(e)}")
-                    st.caption("Debug: Please check the model architecture in the sidebar")
+                    st.error(f"❌ Error analyzing model: {str(e)}")
+                    with st.expander("Debug Details"):
+                        st.code(str(e))
     else:
         st.info("👆 Upload an image or select a test sample to get started")
     
