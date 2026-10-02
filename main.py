@@ -793,7 +793,7 @@ def main():
             st.caption(f"*Image source: {image_source}*" if image_source else "")
         
         # ========================
-        # GradCAM Visualization
+        # Model Interpretability Visualizations
         # ========================
         if show_gradcam:
             st.markdown("---")
@@ -804,9 +804,7 @@ def main():
                 "Select visualization method:",
                 options=[
                     "Saliency Map (Gradient-based)",
-                    "Feature Map Visualization",
-                    "Occlusion Sensitivity",
-                    "GradCAM / Activation Map"
+                    "Occlusion Sensitivity"
                 ],
                 horizontal=True,
                 help="Different methods to understand model decisions"
@@ -837,51 +835,7 @@ def main():
                             st.write("**Saliency Map**")
                             st.image(gradcam_img, use_container_width=True)
                     
-                    elif viz_method == "Feature Map Visualization":
-                        st.info(
-                            "**Feature Map:** Visualizes learned features from the selected convolutional layer. "
-                            "Shows spatial activation patterns."
-                        )
-                        
-                        conv_layers = find_conv_layers(model)
-                        if conv_layers:
-                            layer_options = [
-                                f"{layer_name} {'(nested)' if base_model else ''}" 
-                                for layer_name, base_model in conv_layers
-                            ]
-                            
-                            selected_layer_idx = st.selectbox(
-                                "Select layer:",
-                                range(len(conv_layers)),
-                                format_func=lambda i: layer_options[i],
-                                index=len(conv_layers) - 1,
-                                key="feature_map_layer"
-                            )
-                            
-                            selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
-                            
-                            try:
-                                viz = FeatureMapVisualizer(model, selected_layer_name, selected_base_model)
-                                heatmap = viz.compute(img_preprocessed)
-                                
-                                gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
-                                
-                                col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
-                                with col_orig:
-                                    st.write("**Original Image**")
-                                    st.image(img_preprocessed, use_container_width=True)
-                                with col_sep:
-                                    st.write("")
-                                with col_viz:
-                                    st.write("**Feature Map**")
-                                    st.write(f"*Layer: {selected_layer_name}*")
-                                    st.image(gradcam_img, use_container_width=True)
-                            except Exception as e:
-                                st.error(f"Could not visualize feature map: {str(e)}")
-                        else:
-                            st.warning("No convolutional layers found")
-                    
-                    elif viz_method == "Occlusion Sensitivity":
+                    else:  # Occlusion Sensitivity
                         st.info(
                             "**Occlusion Sensitivity:** Slides a patch across the image and shows "
                             "how much the prediction changes. Bright regions = important for the prediction."
@@ -889,7 +843,7 @@ def main():
                         
                         with st.spinner("Computing occlusion sensitivity (this may take a moment)..."):
                             occlusion = OcclusionSensitivity(model)
-                            heatmap = occlusion.compute(img_preprocessed, patch_size=32)
+                            heatmap = occlusion.compute(img_preprocessed, patch_size=16)
                             
                             gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
                             
@@ -902,55 +856,10 @@ def main():
                             with col_viz:
                                 st.write("**Occlusion Sensitivity**")
                                 st.image(gradcam_img, use_container_width=True)
-                    
-                    else:  # GradCAM / Activation Map
-                        st.info(
-                            "**Activation Map:** Average activations from a convolutional layer. "
-                            "Shows spatial regions with strongest feature activations."
-                        )
-                        
-                        conv_layers = find_conv_layers(model)
-                        if conv_layers:
-                            layer_options = [
-                                f"{layer_name} {'(nested)' if base_model else ''}" 
-                                for layer_name, base_model in conv_layers
-                            ]
-                            
-                            selected_layer_idx = st.selectbox(
-                                "Select layer:",
-                                range(len(conv_layers)),
-                                format_func=lambda i: layer_options[i],
-                                index=len(conv_layers) - 1,
-                                key="gradcam_layer"
-                            )
-                            
-                            selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
-                            
-                            try:
-                                gradcam = GradCAM(model, selected_layer_name, selected_base_model)
-                                predicted_index = np.argmax(all_scores)
-                                heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
-                                
-                                gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
-                                
-                                col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
-                                with col_orig:
-                                    st.write("**Original Image**")
-                                    st.image(img_preprocessed, use_container_width=True)
-                                with col_sep:
-                                    st.write("")
-                                with col_viz:
-                                    st.write("**Activation Map**")
-                                    st.write(f"*Layer: {selected_layer_name}*")
-                                    st.image(gradcam_img, use_container_width=True)
-                            except Exception as e:
-                                st.error(f"Could not generate activation map: {str(e)}")
-                        else:
-                            st.warning("No convolutional layers found")
                 
                 except Exception as e:
                     st.error(f"❌ Visualization failed: {str(e)}")
-                    st.caption("Try a different visualization method")
+                    st.caption("Try the other visualization method")
     else:
         st.info("👆 Upload an image or select a test sample to get started")
     
