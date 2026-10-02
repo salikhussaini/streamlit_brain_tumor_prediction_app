@@ -84,7 +84,7 @@ class GradCAM:
         """
         Args:
             model: Keras model
-            layer_name: Name of the convolutional layer to visualize
+            layer_name: Name of the convolutional layer to visualize (can be nested like 'base_model.Conv_1')
         """
         self.model = model
         self.layer_name = layer_name
@@ -93,8 +93,23 @@ class GradCAM:
     
     def _build_grad_model(self):
         """Build a model that returns both predictions and gradients"""
-        # Find the target layer
-        self.target_layer = self.model.get_layer(self.layer_name)
+        # Try to find the target layer
+        try:
+            # First try direct access
+            self.target_layer = self.model.get_layer(self.layer_name)
+        except ValueError:
+            # If not found, try nested access (e.g., 'mobilenetv2_1.00_224.Conv_1')
+            try:
+                parts = self.layer_name.split('.')
+                layer = self.model.get_layer(parts[0])
+                for part in parts[1:]:
+                    if hasattr(layer, 'get_layer'):
+                        layer = layer.get_layer(part)
+                    else:
+                        raise ValueError(f"Cannot access layer {self.layer_name}")
+                self.target_layer = layer
+            except Exception as e:
+                raise ValueError(f"Cannot find layer {self.layer_name}: {e}")
         
         # Create a model that outputs predictions and target layer outputs
         self.grad_model = tf.keras.models.Model(
@@ -149,25 +164,29 @@ def find_conv_layers(model):
     """
     Find all convolutional layers in the model, including nested layers in transfer learning models
     
-    Recursively searches through:
-    - Direct Conv2D layers
-    - Layers inside functional models
-    - Layers inside sequential models
-    - Layers inside any subclassed models
+    Returns layer names with full paths for nested models (e.g., 'mobilenetv2_1.00_224.Conv_1')
     """
     conv_layers = []
     
-    def _search_layers(layer, prefix=""):
+    def _search_layers(parent_layer, parent_name=""):
         """Recursively search for Conv2D layers"""
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            conv_layers.append(layer.name)
+        if isinstance(parent_layer, tf.keras.layers.Conv2D):
+            # Add this Conv2D layer
+            full_name = f"{parent_name}.{parent_layer.name}" if parent_name else parent_layer.name
+            conv_layers.append(full_name)
         
-        # Handle functional models and other models with layers attribute
-        if hasattr(layer, 'layers'):
-            for sublayer in layer.layers:
-                _search_layers(sublayer, prefix=f"{prefix}{layer.name}/")
+        # Handle layers that contain other layers (models, sequential, functional, etc.)
+        if hasattr(parent_layer, 'layers'):
+            for sublayer in parent_layer.layers:
+                # Build the full path for nested layers
+                if parent_name:
+                    new_parent_name = f"{parent_name}.{parent_layer.name}"
+                else:
+                    new_parent_name = parent_layer.name
+                
+                _search_layers(sublayer, new_parent_name)
     
-    # Search through all layers in the model
+    # Search through all top-level layers in the model
     for layer in model.layers:
         _search_layers(layer)
     
