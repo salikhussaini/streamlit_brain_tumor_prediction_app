@@ -12,6 +12,8 @@ import random
 from io import StringIO
 import sys
 import cv2
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
 # Set page configuration
 st.set_page_config(
@@ -63,6 +65,136 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
     focal = alpha * (1 - p_t) ** gamma * ce
     
     return tf.reduce_mean(focal)
+
+
+# ========================
+# GradCAM Implementation
+# ========================
+class GradCAM:
+    """
+    Gradient-weighted Class Activation Maps (GradCAM)
+    
+    Visualizes which regions of the input image were important for the
+    model's prediction by showing the gradient of the predicted class
+    with respect to the feature maps of a target layer.
+    
+    This provides interpretability - shows where the model "looked" to
+    make its prediction.
+    """
+    
+    def __init__(self, model, layer_name):
+        """
+        Args:
+            model: Keras model
+            layer_name: Name of the convolutional layer to visualize
+        """
+        self.model = model
+        self.layer_name = layer_name
+        self.grad_model = None
+        self._build_grad_model()
+    
+    def _build_grad_model(self):
+        """Build a model that returns both predictions and gradients"""
+        # Find the target layer
+        self.target_layer = self.model.get_layer(self.layer_name)
+        
+        # Create a model that outputs predictions and target layer outputs
+        self.grad_model = tf.keras.models.Model(
+            inputs=[self.model.inputs],
+            outputs=[self.model.output, self.target_layer.output]
+        )
+    
+    def compute_gradcam(self, img_array, pred_index=None):
+        """
+        Compute GradCAM heatmap
+        
+        Args:
+            img_array: Input image array (224, 224, 3)
+            pred_index: Index of the class to visualize (None = use predicted class)
+        
+        Returns:
+            heatmap: GradCAM heatmap (224, 224)
+        """
+        # Add batch dimension
+        img_batch = np.expand_dims(img_array, axis=0)
+        
+        # Record gradients
+        with tf.GradientTape() as tape:
+            predictions, target_layer_output = self.grad_model(img_batch, training=False)
+            
+            # Use predicted class if not specified
+            if pred_index is None:
+                pred_index = tf.argmax(predictions[0])
+            
+            # Get the class channel
+            class_channel = predictions[:, pred_index]
+        
+        # Compute gradients of the class channel with respect to target layer
+        grads = tape.gradient(class_channel, target_layer_output)
+        
+        # Global Average Pooling of gradients over spatial dimensions
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        
+        # Compute weighted activation map
+        target_layer_output = target_layer_output[0]
+        heatmap = target_layer_output @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap, axis=-1)
+        
+        # Normalize heatmap to 0-1 range
+        heatmap = tf.maximum(heatmap, 0)
+        heatmap /= (tf.reduce_max(heatmap) + 1e-10)
+        
+        return heatmap.numpy()
+
+
+def find_conv_layers(model):
+    """Find all convolutional layers in the model"""
+    conv_layers = []
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            conv_layers.append(layer.name)
+    return conv_layers
+
+
+def generate_gradcam_visualization(gradcam_heatmap, original_image, alpha=0.4):
+    """
+    Generate GradCAM visualization with heatmap overlay
+    
+    Args:
+        gradcam_heatmap: GradCAM heatmap (224, 224)
+        original_image: Original input image (224, 224, 3) in 0-1 range
+        alpha: Transparency of heatmap overlay
+    
+    Returns:
+        PIL Image with heatmap overlay
+    """
+    # Resize heatmap to match image size
+    heatmap_resized = cv2.resize(
+        gradcam_heatmap, 
+        (original_image.shape[1], original_image.shape[0])
+    )
+    
+    # Normalize and convert to uint8
+    heatmap_normalized = (heatmap_resized * 255).astype(np.uint8)
+    
+    # Apply colormap (Jet colormap: blue=low importance, red=high importance)
+    heatmap_colored = cv2.applyColorMap(heatmap_normalized, cv2.COLORMAP_JET)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+    
+    # Convert original image to uint8 if needed
+    if original_image.dtype != np.uint8:
+        img_uint8 = (original_image * 255).astype(np.uint8)
+    else:
+        img_uint8 = original_image
+    
+    # If grayscale, convert to RGB
+    if len(img_uint8.shape) == 2:
+        img_uint8 = cv2.cvtColor(img_uint8, cv2.COLOR_GRAY2RGB)
+    
+    # Blend images
+    overlay = cv2.addWeighted(img_uint8, 1 - alpha, heatmap_colored, alpha, 0)
+    
+    return Image.fromarray(overlay)
 
 
 # ========================
@@ -349,6 +481,23 @@ def main():
         st.write(f"**Classes:** {', '.join(class_names)}")
         st.markdown("---")
         
+        # GradCAM Settings
+        st.header("🔍 GradCAM Settings")
+        show_gradcam = st.checkbox(
+            "Show GradCAM Visualization",
+            value=True,
+            help="Display which regions the model focuses on for predictions"
+        )
+        gradcam_alpha = st.slider(
+            "Heatmap Transparency",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.1,
+            help="0 = transparent, 1 = opaque"
+        )
+        st.markdown("---")
+        
         # Model Architecture Summary
         with st.expander("🏗️ Model Architecture"):
             # Display dynamic architecture diagram
@@ -512,6 +661,64 @@ def main():
             
             # Show source
             st.caption(f"*Image source: {image_source}*" if image_source else "")
+        
+        # ========================
+        # GradCAM Visualization
+        # ========================
+        if show_gradcam:
+            st.markdown("---")
+            st.subheader("🔍 Model Interpretability - GradCAM Visualization")
+            
+            with st.spinner("Generating GradCAM heatmap..."):
+                try:
+                    # Find convolutional layers
+                    conv_layers = find_conv_layers(model)
+                    
+                    if conv_layers:
+                        # Use the last convolutional layer for GradCAM
+                        # (captures high-level features without being too abstract)
+                        last_conv_layer = conv_layers[-1]
+                        
+                        # Initialize GradCAM
+                        gradcam = GradCAM(model, last_conv_layer)
+                        
+                        # Compute GradCAM heatmap using preprocessed image
+                        # Get predicted class index
+                        predicted_index = np.argmax(all_scores)
+                        heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
+                        
+                        # Generate visualization with user-selected alpha
+                        gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                        
+                        # Display side-by-side: original and GradCAM
+                        col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
+                        
+                        with col_orig_grad:
+                            st.write("**Original Image**")
+                            st.image(img_preprocessed, use_container_width=True)
+                        
+                        with col_sep_grad:
+                            st.write("")
+                        
+                        with col_gradcam:
+                            st.write("**GradCAM Heatmap**")
+                            st.write(f"*(Layer: {last_conv_layer})*")
+                            st.image(gradcam_img, use_container_width=True)
+                        
+                        st.info(
+                            "**GradCAM Explanation:**\n\n"
+                            "The heatmap shows which regions of the brain MRI were most important "
+                            "for the model's prediction. "
+                            "\n- **Red regions** = High importance for the prediction\n"
+                            "- **Blue regions** = Low importance for the prediction\n\n"
+                            "This helps interpret WHY the model made its prediction."
+                        )
+                    else:
+                        st.warning("No convolutional layers found in model for GradCAM")
+                
+                except Exception as e:
+                    st.warning(f"Could not generate GradCAM: {str(e)}")
+                    st.caption("GradCAM requires a model with convolutional layers")
     else:
         st.info("👆 Upload an image or select a test sample to get started")
     
