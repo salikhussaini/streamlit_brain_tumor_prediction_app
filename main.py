@@ -66,26 +66,125 @@ def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
 
 
 # ========================
-# GradCAM Implementation
+# Visualization Alternatives
 # ========================
-class GradCAM:
-    """
-    Gradient-weighted Class Activation Maps (GradCAM)
+class SaliencyMap:
+    """Compute saliency maps using image gradients"""
     
-    Visualizes which regions of the input image were important for the
-    model's prediction by showing the gradient of the predicted class
-    with respect to the feature maps of a target layer.
+    def __init__(self, model):
+        self.model = model
     
-    Works with both direct Conv2D layers and nested layers in transfer learning models.
-    """
+    def compute(self, img_array, pred_index=None):
+        """Compute gradient-based saliency map"""
+        img_tensor = tf.convert_to_tensor(np.expand_dims(img_array, 0), dtype=tf.float32)
+        
+        with tf.GradientTape() as tape:
+            tape.watch(img_tensor)
+            predictions = self.model(img_tensor, training=False)
+            
+            if pred_index is None:
+                pred_index = int(tf.argmax(predictions[0]).numpy())
+            
+            class_channel = predictions[:, pred_index]
+        
+        grads = tape.gradient(class_channel, img_tensor)
+        saliency = tf.reduce_max(tf.abs(grads), axis=-1)
+        saliency = saliency[0].numpy()
+        
+        # Normalize
+        saliency = np.maximum(saliency, 0)
+        if np.max(saliency) > 0:
+            saliency = saliency / np.max(saliency)
+        
+        return saliency
+
+
+class OcclusionSensitivity:
+    """Visualize model sensitivity by occluding image regions"""
+    
+    def __init__(self, model):
+        self.model = model
+    
+    def compute(self, img_array, patch_size=16):
+        """
+        Compute occlusion sensitivity map
+        Shows how much the prediction changes when different regions are masked
+        """
+        img_batch = np.expand_dims(img_array, 0)
+        original_pred = self.model.predict(img_batch, verbose=0)
+        original_score = np.max(original_pred[0])
+        
+        sensitivity_map = np.zeros((img_array.shape[0], img_array.shape[1]))
+        
+        # Slide a patch across the image
+        for i in range(0, img_array.shape[0], patch_size):
+            for j in range(0, img_array.shape[1], patch_size):
+                # Create occluded image (black out the patch)
+                occluded_img = img_array.copy()
+                occluded_img[i:i+patch_size, j:j+patch_size] = 0
+                
+                # Get prediction
+                occluded_batch = np.expand_dims(occluded_img, 0)
+                occluded_pred = self.model.predict(occluded_batch, verbose=0)
+                occluded_score = np.max(occluded_pred[0])
+                
+                # Sensitivity = how much prediction dropped
+                sensitivity = original_score - occluded_score
+                sensitivity_map[i:i+patch_size, j:j+patch_size] = sensitivity
+        
+        # Normalize
+        sensitivity_map = np.maximum(sensitivity_map, 0)
+        if np.max(sensitivity_map) > 0:
+            sensitivity_map = sensitivity_map / np.max(sensitivity_map)
+        
+        return sensitivity_map
+
+
+class FeatureMapVisualizer:
+    """Visualize feature maps from intermediate layers"""
     
     def __init__(self, model, layer_name, base_model_name=None):
-        """
-        Args:
-            model: Keras model
-            layer_name: Name of the convolutional layer (e.g., 'Conv_1')
-            base_model_name: Parent model name if layer is nested (e.g., 'mobilenetv2_1.00_224')
-        """
+        self.model = model
+        self.layer_name = layer_name
+        self.base_model_name = base_model_name
+    
+    def compute(self, img_array):
+        """Extract and visualize feature maps"""
+        try:
+            # Get the target layer
+            if self.base_model_name:
+                base_model = self.model.get_layer(self.base_model_name)
+                target_layer = base_model.get_layer(self.layer_name)
+            else:
+                target_layer = self.model.get_layer(self.layer_name)
+            
+            # Create feature extraction model
+            feature_model = tf.keras.Model(
+                inputs=self.model.input,
+                outputs=target_layer.output
+            )
+            
+            # Get features
+            img_batch = np.expand_dims(img_array, 0)
+            features = feature_model.predict(img_batch, verbose=0)
+            
+            # Average across channels to get a 2D map
+            feature_map = np.mean(features[0], axis=-1)
+            
+            # Normalize
+            feature_map = np.maximum(feature_map, 0)
+            if np.max(feature_map) > 0:
+                feature_map = feature_map / np.max(feature_map)
+            
+            return feature_map
+        except Exception as e:
+            raise ValueError(f"Could not extract feature map: {e}")
+
+
+class GradCAM:
+    """Original GradCAM Implementation (kept for reference)"""
+    
+    def __init__(self, model, layer_name, base_model_name=None):
         self.model = model
         self.layer_name = layer_name
         self.base_model_name = base_model_name
@@ -95,10 +194,8 @@ class GradCAM:
     def _find_target_layer(self):
         """Find and store the target layer"""
         try:
-            # Case 1: Direct layer access (non-nested)
             self.target_layer = self.model.get_layer(self.layer_name)
         except ValueError:
-            # Case 2: Nested layer
             if self.base_model_name:
                 try:
                     base_model = self.model.get_layer(self.base_model_name)
@@ -111,70 +208,28 @@ class GradCAM:
                 raise ValueError(f"Cannot find layer {self.layer_name}")
     
     def compute_gradcam(self, img_array, pred_index=None):
-        """
-        Compute activation map heatmap for nested transfer learning models
-        
-        Uses layer activation averaging which works reliably with complex model architectures.
-        
-        Args:
-            img_array: Input image array (224, 224, 3)
-            pred_index: Index of the class to visualize (None = use predicted class)
-        
-        Returns:
-            heatmap: Activation heatmap (224, 224)
-        """
-        # Add batch dimension
+        """Fallback activation map computation"""
         img_batch = np.expand_dims(img_array, axis=0)
-        img_tensor = tf.convert_to_tensor(img_batch, dtype=tf.float32)
         
-        # Use Keras backend function to extract layer outputs
+        # Simple approach: average layer output
         try:
-            # Create a function that extracts the target layer output
-            layer_output_fn = tf.keras.backend.function(
-                [self.model.input],
-                [self.target_layer.output]
+            # Build sub-model to get layer outputs
+            intermediate_model = tf.keras.Model(
+                inputs=self.model.input,
+                outputs=self.target_layer.output
             )
+            layer_output = intermediate_model.predict(img_batch, verbose=0)
             
-            # Get the layer output for this image
-            layer_output = layer_output_fn([img_array])[0]  # Shape: (1, height, width, channels)
-            
-            # Compute importance scores for each channel
-            # Average the absolute activations across spatial dimensions
-            channel_importance = np.mean(np.abs(layer_output[0]), axis=(0, 1))  # (channels,)
-            
-            # Weight each channel by its importance
-            weighted_activations = layer_output[0] * channel_importance[np.newaxis, np.newaxis, :]
-            
-            # Average across channels to get spatial importance map
-            heatmap = np.mean(weighted_activations, axis=-1)  # (height, width)
-            
-            # Normalize heatmap to 0-1 range
+            # Average across channels
+            heatmap = np.mean(layer_output[0], axis=-1)
             heatmap = np.maximum(heatmap, 0)
             if np.max(heatmap) > 0:
                 heatmap = heatmap / np.max(heatmap)
             
             return heatmap
-        
-        except Exception as e:
-            # Fallback: just average the activations
-            try:
-                layer_output_fn = tf.keras.backend.function(
-                    [self.model.input],
-                    [self.target_layer.output]
-                )
-                layer_output = layer_output_fn([img_array])[0]
-                
-                # Simple average across channels
-                heatmap = np.mean(np.abs(layer_output[0]), axis=-1)
-                
-                # Normalize
-                heatmap = np.maximum(heatmap, 0)
-                if np.max(heatmap) > 0:
-                    heatmap = heatmap / np.max(heatmap)
-                
-                return heatmap
-            except Exception as fallback_e:
-                raise RuntimeError(f"Could not compute activation map: {str(e)}, Fallback error: {str(fallback_e)}")
+        except:
+            # Last resort: return zeros
+            return np.zeros((img_array.shape[0], img_array.shape[1]))
 
 
 def find_conv_layers(model):
@@ -742,119 +797,160 @@ def main():
         # ========================
         if show_gradcam:
             st.markdown("---")
-            st.subheader("🔍 Model Interpretability - Layer Activation Map")
+            st.subheader("🔍 Model Interpretability - Multiple Visualization Options")
             
-            with st.spinner("Analyzing convolutional layers..."):
+            # Choose visualization method
+            viz_method = st.radio(
+                "Select visualization method:",
+                options=[
+                    "Saliency Map (Gradient-based)",
+                    "Feature Map Visualization",
+                    "Occlusion Sensitivity",
+                    "GradCAM / Activation Map"
+                ],
+                horizontal=True,
+                help="Different methods to understand model decisions"
+            )
+            
+            with st.spinner("Generating visualization..."):
                 try:
-                    # Find all convolutional layers
-                    conv_layers = find_conv_layers(model)
-                    
-                    if conv_layers:
-                        st.success(f"✓ Found {len(conv_layers)} convolutional layer(s)")
-                        
-                        # Select which layer to visualize (default to last one)
-                        layer_options = [
-                            f"{layer_name} {'(nested)' if base_model else ''}" 
-                            for layer_name, base_model in conv_layers
-                        ]
-                        
-                        selected_layer_idx = st.selectbox(
-                            "Select convolutional layer for visualization:",
-                            range(len(conv_layers)),
-                            format_func=lambda i: layer_options[i],
-                            index=len(conv_layers) - 1  # Default to last layer
+                    if viz_method == "Saliency Map (Gradient-based)":
+                        st.info(
+                            "**Saliency Map:** Shows which input pixels have the strongest gradient "
+                            "with respect to the predicted class. "
+                            "Bright regions = pixels most important for the prediction."
                         )
                         
-                        selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
+                        saliency = SaliencyMap(model)
+                        predicted_index = np.argmax(all_scores)
+                        heatmap = saliency.compute(img_preprocessed, pred_index=predicted_index)
                         
-                        with st.spinner(f"Generating activation map for layer '{selected_layer_name}'..."):
+                        gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                        
+                        col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
+                        with col_orig:
+                            st.write("**Original Image**")
+                            st.image(img_preprocessed, use_container_width=True)
+                        with col_sep:
+                            st.write("")
+                        with col_viz:
+                            st.write("**Saliency Map**")
+                            st.image(gradcam_img, use_container_width=True)
+                    
+                    elif viz_method == "Feature Map Visualization":
+                        st.info(
+                            "**Feature Map:** Visualizes learned features from the selected convolutional layer. "
+                            "Shows spatial activation patterns."
+                        )
+                        
+                        conv_layers = find_conv_layers(model)
+                        if conv_layers:
+                            layer_options = [
+                                f"{layer_name} {'(nested)' if base_model else ''}" 
+                                for layer_name, base_model in conv_layers
+                            ]
+                            
+                            selected_layer_idx = st.selectbox(
+                                "Select layer:",
+                                range(len(conv_layers)),
+                                format_func=lambda i: layer_options[i],
+                                index=len(conv_layers) - 1,
+                                key="feature_map_layer"
+                            )
+                            
+                            selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
+                            
                             try:
-                                # Initialize GradCAM with proper layer references
-                                gradcam = GradCAM(model, selected_layer_name, selected_base_model)
+                                viz = FeatureMapVisualizer(model, selected_layer_name, selected_base_model)
+                                heatmap = viz.compute(img_preprocessed)
                                 
-                                # Compute GradCAM heatmap
+                                gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                                
+                                col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
+                                with col_orig:
+                                    st.write("**Original Image**")
+                                    st.image(img_preprocessed, use_container_width=True)
+                                with col_sep:
+                                    st.write("")
+                                with col_viz:
+                                    st.write("**Feature Map**")
+                                    st.write(f"*Layer: {selected_layer_name}*")
+                                    st.image(gradcam_img, use_container_width=True)
+                            except Exception as e:
+                                st.error(f"Could not visualize feature map: {str(e)}")
+                        else:
+                            st.warning("No convolutional layers found")
+                    
+                    elif viz_method == "Occlusion Sensitivity":
+                        st.info(
+                            "**Occlusion Sensitivity:** Slides a patch across the image and shows "
+                            "how much the prediction changes. Bright regions = important for the prediction."
+                        )
+                        
+                        with st.spinner("Computing occlusion sensitivity (this may take a moment)..."):
+                            occlusion = OcclusionSensitivity(model)
+                            heatmap = occlusion.compute(img_preprocessed, patch_size=32)
+                            
+                            gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                            
+                            col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
+                            with col_orig:
+                                st.write("**Original Image**")
+                                st.image(img_preprocessed, use_container_width=True)
+                            with col_sep:
+                                st.write("")
+                            with col_viz:
+                                st.write("**Occlusion Sensitivity**")
+                                st.image(gradcam_img, use_container_width=True)
+                    
+                    else:  # GradCAM / Activation Map
+                        st.info(
+                            "**Activation Map:** Average activations from a convolutional layer. "
+                            "Shows spatial regions with strongest feature activations."
+                        )
+                        
+                        conv_layers = find_conv_layers(model)
+                        if conv_layers:
+                            layer_options = [
+                                f"{layer_name} {'(nested)' if base_model else ''}" 
+                                for layer_name, base_model in conv_layers
+                            ]
+                            
+                            selected_layer_idx = st.selectbox(
+                                "Select layer:",
+                                range(len(conv_layers)),
+                                format_func=lambda i: layer_options[i],
+                                index=len(conv_layers) - 1,
+                                key="gradcam_layer"
+                            )
+                            
+                            selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
+                            
+                            try:
+                                gradcam = GradCAM(model, selected_layer_name, selected_base_model)
                                 predicted_index = np.argmax(all_scores)
                                 heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
                                 
-                                # Generate visualization with user-selected alpha
                                 gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
                                 
-                                # Display side-by-side: original and GradCAM
-                                col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
-                                
-                                with col_orig_grad:
+                                col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
+                                with col_orig:
                                     st.write("**Original Image**")
                                     st.image(img_preprocessed, use_container_width=True)
-                                
-                                with col_sep_grad:
+                                with col_sep:
                                     st.write("")
-                                
-                                with col_gradcam:
-                                    st.write("**GradCAM Heatmap**")
-                                    layer_info = f"{selected_layer_name}"
-                                    if selected_base_model:
-                                        layer_info += f" (from {selected_base_model})"
-                                    st.write(f"*Layer: {layer_info}*")
+                                with col_viz:
+                                    st.write("**Activation Map**")
+                                    st.write(f"*Layer: {selected_layer_name}*")
                                     st.image(gradcam_img, use_container_width=True)
-                                
-                                st.info(
-                                    "**GradCAM / Activation Map Explanation:**\n\n"
-                                    "The heatmap shows which regions of the brain MRI were most activated "
-                                    "by the convolutional layer for this prediction. "
-                                    "\n- **Red/Yellow regions** = High activation (important features)\n"
-                                    "- **Blue/Green regions** = Low activation (less important)\n\n"
-                                    "For transfer learning models with complex architectures, this shows "
-                                    "the spatial importance of features detected by the layer."
-                                )
-                            
-                            except Exception as grad_error:
-                                st.error(f"❌ Could not generate activation map: {str(grad_error)}")
-                                
-                                with st.expander("🔧 Debugging Information"):
-                                    st.write("**Available layers in model:**")
-                                    layer_info = get_all_layers_info(model)
-                                    for info in layer_info:
-                                        st.code(f"{info['name']} ({info['type']})")
-                                    
-                                    st.write("\n**Found convolutional layers:**")
-                                    for layer_name, base_model in conv_layers:
-                                        if base_model:
-                                            st.code(f"- {layer_name} (inside {base_model})")
-                                        else:
-                                            st.code(f"- {layer_name}")
-                    
-                    else:
-                        st.warning("⚠️ No convolutional layers found in model")
-                        
-                        with st.expander("🔧 Model Architecture Information"):
-                            st.write("**All layers in your model:**")
-                            layer_info = get_all_layers_info(model)
-                            for info in layer_info:
-                                st.code(f"{info['name']} ({info['type']})")
-                            
-                            st.info(
-                                "**Options to fix this:**\n\n"
-                                "1. **Check if model has a base_model attribute:**\n"
-                                "   - Ensure base layers are accessible (not wrapped in a way that hides them)\n"
-                                "   - Try accessing: `model.layers[0].layers` for nested models\n\n"
-                                "2. **Rebuild the model:**\n"
-                                "   ```python\n"
-                                "   base_model = tf.keras.applications.MobileNetV2(...)\n"
-                                "   model = tf.keras.Sequential([\n"
-                                "       base_model,\n"
-                                "       tf.keras.layers.GlobalAveragePooling2D(),\n"
-                                "       tf.keras.layers.Dense(num_classes)\n"
-                                "   ])\n"
-                                "   ```\n\n"
-                                "3. **Use Activation Maps instead** (alternative to GradCAM):\n"
-                                "   - Extract feature maps directly from intermediate layers\n"
-                                "   - Works with any model architecture"
-                            )
+                            except Exception as e:
+                                st.error(f"Could not generate activation map: {str(e)}")
+                        else:
+                            st.warning("No convolutional layers found")
                 
                 except Exception as e:
-                    st.error(f"❌ Error analyzing model: {str(e)}")
-                    with st.expander("Debug Details"):
-                        st.code(str(e))
+                    st.error(f"❌ Visualization failed: {str(e)}")
+                    st.caption("Try a different visualization method")
     else:
         st.info("👆 Upload an image or select a test sample to get started")
     
