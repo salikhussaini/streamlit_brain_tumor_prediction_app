@@ -99,6 +99,43 @@ class SaliencyMap:
         return saliency
 
 
+class GradientInput:
+    """Compute Gradient × Input attribution (emphasizes gradients from important pixels)"""
+    
+    def __init__(self, model):
+        self.model = model
+    
+    def compute(self, img_array, pred_index=None):
+        """Compute gradient × input attribution map"""
+        img_tensor = tf.convert_to_tensor(np.expand_dims(img_array, 0), dtype=tf.float32)
+        
+        with tf.GradientTape() as tape:
+            tape.watch(img_tensor)
+            predictions = self.model(img_tensor, training=False)
+            
+            if pred_index is None:
+                pred_index = int(tf.argmax(predictions[0]).numpy())
+            
+            class_channel = predictions[:, pred_index]
+        
+        # Compute gradients
+        grads = tape.gradient(class_channel, img_tensor)
+        grads = tf.abs(grads)[0].numpy()  # Remove batch dimension
+        
+        # Multiply by input (emphasize gradients from high-intensity pixels)
+        attribution = grads * img_array
+        
+        # Take max across channels
+        attribution_map = np.max(attribution, axis=-1)
+        
+        # Normalize
+        attribution_map = np.maximum(attribution_map, 0)
+        if np.max(attribution_map) > 0:
+            attribution_map = attribution_map / np.max(attribution_map)
+        
+        return attribution_map
+
+
 class OcclusionSensitivity:
     """Visualize model sensitivity by occluding image regions"""
     
@@ -804,6 +841,7 @@ def main():
                 "Select visualization method:",
                 options=[
                     "Saliency Map (Gradient-based)",
+                    "Gradient × Input",
                     "Occlusion Sensitivity"
                 ],
                 horizontal=True,
@@ -833,6 +871,29 @@ def main():
                             st.write("")
                         with col_viz:
                             st.write("**Saliency Map**")
+                            st.image(gradcam_img, use_container_width=True)
+                    
+                    elif viz_method == "Gradient × Input":
+                        st.info(
+                            "**Gradient × Input:** Multiplies gradients by input intensities. "
+                            "Emphasizes gradients from high-intensity regions (where image features are strong). "
+                            "Bright regions = pixels with strong features AND high influence on prediction."
+                        )
+                        
+                        grad_input = GradientInput(model)
+                        predicted_index = np.argmax(all_scores)
+                        heatmap = grad_input.compute(img_preprocessed, pred_index=predicted_index)
+                        
+                        gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                        
+                        col_orig, col_sep, col_viz = st.columns([1, 0.1, 1])
+                        with col_orig:
+                            st.write("**Original Image**")
+                            st.image(img_preprocessed, use_container_width=True)
+                        with col_sep:
+                            st.write("")
+                        with col_viz:
+                            st.write("**Gradient × Input**")
                             st.image(gradcam_img, use_container_width=True)
                     
                     else:  # Occlusion Sensitivity
