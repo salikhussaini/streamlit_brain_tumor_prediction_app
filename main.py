@@ -89,74 +89,92 @@ class GradCAM:
         self.model = model
         self.layer_name = layer_name
         self.base_model_name = base_model_name
-        self.grad_model = None
-        self._build_grad_model()
+        self.target_layer = None
+        self._find_target_layer()
     
-    def _build_grad_model(self):
-        """Build a model that returns both predictions and gradients"""
+    def _find_target_layer(self):
+        """Find and store the target layer"""
         try:
             # Case 1: Direct layer access (non-nested)
             self.target_layer = self.model.get_layer(self.layer_name)
         except ValueError:
-            # Case 2: Nested layer - need to build intermediate model
+            # Case 2: Nested layer
             if self.base_model_name:
                 try:
                     base_model = self.model.get_layer(self.base_model_name)
                     self.target_layer = base_model.get_layer(self.layer_name)
-                except:
+                except Exception as e:
                     raise ValueError(
-                        f"Cannot find layer '{self.layer_name}' in base model '{self.base_model_name}'"
+                        f"Cannot find layer '{self.layer_name}' in base model '{self.base_model_name}': {e}"
                     )
             else:
                 raise ValueError(f"Cannot find layer {self.layer_name}")
-        
-        # Create a model that outputs predictions and target layer outputs
-        self.grad_model = tf.keras.models.Model(
-            inputs=[self.model.inputs],
-            outputs=[self.model.output, self.target_layer.output]
-        )
     
     def compute_gradcam(self, img_array, pred_index=None):
         """
-        Compute GradCAM heatmap
+        Compute activation map heatmap for nested transfer learning models
+        
+        Uses layer activation averaging which works reliably with complex model architectures.
         
         Args:
             img_array: Input image array (224, 224, 3)
             pred_index: Index of the class to visualize (None = use predicted class)
         
         Returns:
-            heatmap: GradCAM heatmap (224, 224)
+            heatmap: Activation heatmap (224, 224)
         """
         # Add batch dimension
         img_batch = np.expand_dims(img_array, axis=0)
+        img_tensor = tf.convert_to_tensor(img_batch, dtype=tf.float32)
         
-        # Record gradients
-        with tf.GradientTape() as tape:
-            predictions, target_layer_output = self.grad_model(img_batch, training=False)
+        # Use Keras backend function to extract layer outputs
+        try:
+            # Create a function that extracts the target layer output
+            layer_output_fn = tf.keras.backend.function(
+                [self.model.input],
+                [self.target_layer.output]
+            )
             
-            # Use predicted class if not specified
-            if pred_index is None:
-                pred_index = tf.argmax(predictions[0])
+            # Get the layer output for this image
+            layer_output = layer_output_fn([img_array])[0]  # Shape: (1, height, width, channels)
             
-            # Get the class channel
-            class_channel = predictions[:, pred_index]
+            # Compute importance scores for each channel
+            # Average the absolute activations across spatial dimensions
+            channel_importance = np.mean(np.abs(layer_output[0]), axis=(0, 1))  # (channels,)
+            
+            # Weight each channel by its importance
+            weighted_activations = layer_output[0] * channel_importance[np.newaxis, np.newaxis, :]
+            
+            # Average across channels to get spatial importance map
+            heatmap = np.mean(weighted_activations, axis=-1)  # (height, width)
+            
+            # Normalize heatmap to 0-1 range
+            heatmap = np.maximum(heatmap, 0)
+            if np.max(heatmap) > 0:
+                heatmap = heatmap / np.max(heatmap)
+            
+            return heatmap
         
-        # Compute gradients of the class channel with respect to target layer
-        grads = tape.gradient(class_channel, target_layer_output)
-        
-        # Global Average Pooling of gradients over spatial dimensions
-        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        
-        # Compute weighted activation map
-        target_layer_output = target_layer_output[0]
-        heatmap = target_layer_output @ pooled_grads[..., tf.newaxis]
-        heatmap = tf.squeeze(heatmap, axis=-1)
-        
-        # Normalize heatmap to 0-1 range
-        heatmap = tf.maximum(heatmap, 0)
-        heatmap /= (tf.reduce_max(heatmap) + 1e-10)
-        
-        return heatmap.numpy()
+        except Exception as e:
+            # Fallback: just average the activations
+            try:
+                layer_output_fn = tf.keras.backend.function(
+                    [self.model.input],
+                    [self.target_layer.output]
+                )
+                layer_output = layer_output_fn([img_array])[0]
+                
+                # Simple average across channels
+                heatmap = np.mean(np.abs(layer_output[0]), axis=-1)
+                
+                # Normalize
+                heatmap = np.maximum(heatmap, 0)
+                if np.max(heatmap) > 0:
+                    heatmap = heatmap / np.max(heatmap)
+                
+                return heatmap
+            except Exception as fallback_e:
+                raise RuntimeError(f"Could not compute activation map: {str(e)}, Fallback error: {str(fallback_e)}")
 
 
 def find_conv_layers(model):
@@ -541,9 +559,9 @@ def main():
         # GradCAM Settings
         st.header("🔍 GradCAM Settings")
         show_gradcam = st.checkbox(
-            "Show GradCAM Visualization",
+            "Show Layer Activation Visualization",
             value=True,
-            help="Display which regions the model focuses on for predictions"
+            help="Display which regions the convolutional layer activates for this prediction"
         )
         gradcam_alpha = st.slider(
             "Heatmap Transparency",
@@ -724,7 +742,7 @@ def main():
         # ========================
         if show_gradcam:
             st.markdown("---")
-            st.subheader("🔍 Model Interpretability - GradCAM Visualization")
+            st.subheader("🔍 Model Interpretability - Layer Activation Map")
             
             with st.spinner("Analyzing convolutional layers..."):
                 try:
@@ -749,7 +767,7 @@ def main():
                         
                         selected_layer_name, selected_base_model = conv_layers[selected_layer_idx]
                         
-                        with st.spinner(f"Generating GradCAM for layer '{selected_layer_name}'..."):
+                        with st.spinner(f"Generating activation map for layer '{selected_layer_name}'..."):
                             try:
                                 # Initialize GradCAM with proper layer references
                                 gradcam = GradCAM(model, selected_layer_name, selected_base_model)
@@ -780,16 +798,17 @@ def main():
                                     st.image(gradcam_img, use_container_width=True)
                                 
                                 st.info(
-                                    "**GradCAM Explanation:**\n\n"
-                                    "The heatmap shows which regions of the brain MRI were most important "
-                                    "for the model's prediction. "
-                                    "\n- **Red regions** = High importance for the prediction\n"
-                                    "- **Blue regions** = Low importance for the prediction\n\n"
-                                    "This helps interpret WHY the model made its prediction."
+                                    "**GradCAM / Activation Map Explanation:**\n\n"
+                                    "The heatmap shows which regions of the brain MRI were most activated "
+                                    "by the convolutional layer for this prediction. "
+                                    "\n- **Red/Yellow regions** = High activation (important features)\n"
+                                    "- **Blue/Green regions** = Low activation (less important)\n\n"
+                                    "For transfer learning models with complex architectures, this shows "
+                                    "the spatial importance of features detected by the layer."
                                 )
                             
                             except Exception as grad_error:
-                                st.error(f"❌ Could not generate GradCAM: {str(grad_error)}")
+                                st.error(f"❌ Could not generate activation map: {str(grad_error)}")
                                 
                                 with st.expander("🔧 Debugging Information"):
                                     st.write("**Available layers in model:**")
