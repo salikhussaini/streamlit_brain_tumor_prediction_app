@@ -146,11 +146,31 @@ class GradCAM:
 
 
 def find_conv_layers(model):
-    """Find all convolutional layers in the model"""
+    """
+    Find all convolutional layers in the model, including nested layers in transfer learning models
+    
+    Recursively searches through:
+    - Direct Conv2D layers
+    - Layers inside functional models
+    - Layers inside sequential models
+    - Layers inside any subclassed models
+    """
     conv_layers = []
-    for layer in model.layers:
+    
+    def _search_layers(layer, prefix=""):
+        """Recursively search for Conv2D layers"""
         if isinstance(layer, tf.keras.layers.Conv2D):
             conv_layers.append(layer.name)
+        
+        # Handle functional models and other models with layers attribute
+        if hasattr(layer, 'layers'):
+            for sublayer in layer.layers:
+                _search_layers(sublayer, prefix=f"{prefix}{layer.name}/")
+    
+    # Search through all layers in the model
+    for layer in model.layers:
+        _search_layers(layer)
+    
     return conv_layers
 
 
@@ -669,54 +689,96 @@ def main():
             
             with st.spinner("Generating GradCAM heatmap..."):
                 try:
-                    # Find convolutional layers
+                    # Find convolutional layers (including nested layers in transfer learning)
                     conv_layers = find_conv_layers(model)
+                    
+                    if not conv_layers:
+                        # Fallback: search for any layer with 'conv' in the name
+                        conv_layers = [layer.name for layer in model.layers if 'conv' in layer.name.lower()]
                     
                     if conv_layers:
                         # Use the last convolutional layer for GradCAM
                         # (captures high-level features without being too abstract)
                         last_conv_layer = conv_layers[-1]
                         
-                        # Initialize GradCAM
-                        gradcam = GradCAM(model, last_conv_layer)
+                        try:
+                            # Initialize GradCAM
+                            gradcam = GradCAM(model, last_conv_layer)
+                            
+                            # Compute GradCAM heatmap using preprocessed image
+                            # Get predicted class index
+                            predicted_index = np.argmax(all_scores)
+                            heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
+                            
+                            # Generate visualization with user-selected alpha
+                            gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                            
+                            # Display side-by-side: original and GradCAM
+                            col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
+                            
+                            with col_orig_grad:
+                                st.write("**Original Image**")
+                                st.image(img_preprocessed, use_container_width=True)
+                            
+                            with col_sep_grad:
+                                st.write("")
+                            
+                            with col_gradcam:
+                                st.write("**GradCAM Heatmap**")
+                                st.write(f"*(Layer: {last_conv_layer})*")
+                                st.image(gradcam_img, use_container_width=True)
+                            
+                            st.info(
+                                "**GradCAM Explanation:**\n\n"
+                                "The heatmap shows which regions of the brain MRI were most important "
+                                "for the model's prediction. "
+                                "\n- **Red regions** = High importance for the prediction\n"
+                                "- **Blue regions** = Low importance for the prediction\n\n"
+                                "This helps interpret WHY the model made its prediction."
+                            )
                         
-                        # Compute GradCAM heatmap using preprocessed image
-                        # Get predicted class index
-                        predicted_index = np.argmax(all_scores)
-                        heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
-                        
-                        # Generate visualization with user-selected alpha
-                        gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
-                        
-                        # Display side-by-side: original and GradCAM
-                        col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
-                        
-                        with col_orig_grad:
-                            st.write("**Original Image**")
-                            st.image(img_preprocessed, use_container_width=True)
-                        
-                        with col_sep_grad:
-                            st.write("")
-                        
-                        with col_gradcam:
-                            st.write("**GradCAM Heatmap**")
-                            st.write(f"*(Layer: {last_conv_layer})*")
-                            st.image(gradcam_img, use_container_width=True)
-                        
-                        st.info(
-                            "**GradCAM Explanation:**\n\n"
-                            "The heatmap shows which regions of the brain MRI were most important "
-                            "for the model's prediction. "
-                            "\n- **Red regions** = High importance for the prediction\n"
-                            "- **Blue regions** = Low importance for the prediction\n\n"
-                            "This helps interpret WHY the model made its prediction."
-                        )
+                        except Exception as grad_error:
+                            st.warning(f"Could not generate GradCAM for layer '{last_conv_layer}': {str(grad_error)}")
+                            
+                            # Try alternative: first conv layer
+                            if len(conv_layers) > 1:
+                                st.info("Attempting with earlier convolutional layer...")
+                                try:
+                                    first_conv_layer = conv_layers[0]
+                                    gradcam = GradCAM(model, first_conv_layer)
+                                    predicted_index = np.argmax(all_scores)
+                                    heatmap = gradcam.compute_gradcam(img_preprocessed, pred_index=predicted_index)
+                                    gradcam_img = generate_gradcam_visualization(heatmap, img_preprocessed, alpha=gradcam_alpha)
+                                    
+                                    col_orig_grad, col_sep_grad, col_gradcam = st.columns([1, 0.1, 1])
+                                    with col_orig_grad:
+                                        st.write("**Original Image**")
+                                        st.image(img_preprocessed, use_container_width=True)
+                                    with col_sep_grad:
+                                        st.write("")
+                                    with col_gradcam:
+                                        st.write("**GradCAM Heatmap**")
+                                        st.write(f"*(Layer: {first_conv_layer})*")
+                                        st.image(gradcam_img, use_container_width=True)
+                                except Exception as fallback_error:
+                                    st.error(f"Could not generate GradCAM: {str(fallback_error)}")
+                            else:
+                                st.error("Could not generate GradCAM with available layers")
                     else:
-                        st.warning("No convolutional layers found in model for GradCAM")
+                        st.warning("⚠️ No convolutional layers found in model")
+                        st.info(
+                            "**For Transfer Learning Models:**\n\n"
+                            "If using MobileNetV2, EfficientNet, or similar pretrained models, "
+                            "the convolutional layers might be nested inside a base model layer. "
+                            "\n\n**To enable GradCAM:**\n"
+                            "1. Ensure your model has Conv2D layers accessible at the model level\n"
+                            "2. Try extracting the base model and wrapping it in a new Sequential model\n"
+                            "3. Check that the model was compiled with `trainable=True` for base layers"
+                        )
                 
                 except Exception as e:
-                    st.warning(f"Could not generate GradCAM: {str(e)}")
-                    st.caption("GradCAM requires a model with convolutional layers")
+                    st.error(f"GradCAM Error: {str(e)}")
+                    st.caption("Debug: Please check the model architecture in the sidebar")
     else:
         st.info("👆 Upload an image or select a test sample to get started")
     
