@@ -12,8 +12,6 @@ import random
 from io import StringIO
 import sys
 import cv2
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 
 # Set page configuration
 st.set_page_config(
