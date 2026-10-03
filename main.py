@@ -367,18 +367,29 @@ def generate_gradcam_visualization(gradcam_heatmap, original_image, alpha=0.4):
 # ========================
 # Load Model
 # ========================
+def extract_accuracy_from_filename(filename):
+    """Extract accuracy value from model filename (e.g., 'Acc95' -> 95)"""
+    import re
+    match = re.search(r'Acc(\d+)', filename)
+    return int(match.group(1)) if match else 0
+
+
 def get_all_models():
-    """Get list of all available models sorted by date (latest first)"""
-    model_files = sorted(MODELS_DIR.glob('brain_tumor_model_*.keras'), reverse=True)
+    """Get list of all available models sorted by accuracy (highest first)"""
+    model_files = list(MODELS_DIR.glob('*.keras'))
+    # Sort by accuracy (descending), then by filename for consistency
+    model_files = sorted(model_files, key=lambda mf: (-extract_accuracy_from_filename(mf.name), mf.name))
     return [(str(mf), mf.name) for mf in model_files]
 
 
 def find_latest_model():
-    """Find the latest timestamped model"""
-    model_files = sorted(MODELS_DIR.glob('brain_tumor_model_*.keras'), reverse=True)
-    if model_files:
-        return str(model_files[0]), model_files[0].name
-    return None, None
+    """Find the most accurate model"""
+    model_files = list(MODELS_DIR.glob('*.keras'))
+    if not model_files:
+        return None, None
+    # Sort by accuracy (descending) to get the highest accuracy model
+    best_model = max(model_files, key=lambda mf: extract_accuracy_from_filename(mf.name))
+    return str(best_model), best_model.name
 
 
 @st.cache_resource
